@@ -15,25 +15,35 @@ find_package(catkin REQUIRED COMPONENTS
     geometry_msgs
     nav_msgs
     sensor_msgs
+    rosbag
     tf
     cv_bridge
     )
 
 find_package(OpenCV REQUIRED)
-
 find_package(Pangolin REQUIRED)
 
+catkin_package()
+
 include_directories(
+  include
   ${catkin_INCLUDE_DIRS}
   ${Pangolin_INCLUDE_DIRS}
 )
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
+
 add_executable(show_bias
     src/show_bias.cpp
     )
-
 target_link_libraries(show_bias ${catkin_LIBRARIES} ${OpenCV_LIBS}  ${Pangolin_LIBRARIES}) 
+
+
+# record msckf results,then play the bag file
+add_executable(show_msckf_bag
+    src/show_msckf_bag.cpp
+    )
+target_link_libraries(show_msckf_bag ${catkin_LIBRARIES} ${OpenCV_LIBS}  ${Pangolin_LIBRARIES}) 
 
 
