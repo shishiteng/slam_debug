@@ -28,7 +28,7 @@ using namespace cv;
 
 ros::Publisher path_pub;
 ros::Publisher odom_pub;
-ros::Publisher pose_pub;
+ros::Publisher window_pub;
 
 int index_ = 0;
 int length = 0;
@@ -39,6 +39,8 @@ map<double,msckf::CameraMeasurementConstPtr> tracking_features_msgs;
 map<double,msckf::CameraMeasurementConstPtr> lost_features_msgs;
 map<double,nav_msgs::Odometry::ConstPtr> odom_msgs;
 map<double,nav_msgs::Path::ConstPtr> path_msgs;
+map<double,nav_msgs::Path::ConstPtr> window_msgs;
+map<double,nav_msgs::Path::ConstPtr> marg_frame_msgs;
 
 void printHelp()
 {
@@ -214,7 +216,12 @@ void processMessage(int nIndex)
     path_pub.publish(*path_msg);
   }
 
-  
+  //current sliding window
+  nav_msgs::Path::ConstPtr window_msg = window_msgs[timestamp];
+  if(window_msg != NULL) {
+    //cout<<"path:"<<path_msg->header.stamp<<endl;
+    window_pub.publish(*window_msg);
+  }
 }
 
 
@@ -237,7 +244,6 @@ int main(int argc, char **argv)
   // register publisher
   path_pub = nh.advertise<nav_msgs::Path>("path", 1);
   odom_pub = nh.advertise<nav_msgs::Odometry>("odom", 1);
-  pose_pub = nh.advertise<geometry_msgs::PoseStamped>("pose", 1);
 
 #ifdef LIVE
   // open bag
@@ -248,7 +254,6 @@ int main(int argc, char **argv)
   topics.push_back(std::string("/msckf/debug_stereo_image"));
   topics.push_back(std::string("/msckf/path"));
   topics.push_back(std::string("/msckf/odom"));
-  topics.push_back(std::string("/msckf/pose"));
   topics.push_back(std::string("/msckf/imu_bias"));
   topics.push_back(std::string("/msckf/features"));
   topics.push_back(std::string("/msckf/lost_features"));
@@ -262,6 +267,8 @@ int main(int argc, char **argv)
   topics.push_back(std::string("/image_processor/features"));
   topics.push_back(std::string("/MsckfVio/path"));
   topics.push_back(std::string("/MsckfVio/odom"));
+  topics.push_back(std::string("/MsckfVio/sliding_window"));
+  topics.push_back(std::string("/MsckfVio/marginalized_frame"));
   topics.push_back(std::string("/MsckfVio/imu_bias"));
   topics.push_back(std::string("/MsckfVio/lost_features"));
 #endif
@@ -275,6 +282,8 @@ int main(int argc, char **argv)
   cout<<" lost_features_msgs:"<< lost_features_msgs.size()<<endl;
   cout<<" odom_msgs:"<< odom_msgs.size()<<endl;
   cout<<" path_msgs:"<< path_msgs.size()<<endl;
+  cout<<" sliding_window_msgs:"<< window_msgs.size()<<endl;
+  cout<<" marg_frame_msgs:"<< marg_frame_msgs.size()<<endl;
 
   namedWindow("stereo_debug");
   namedWindow("stereo_debug_prev");
