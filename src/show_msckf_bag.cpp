@@ -20,6 +20,7 @@
 #define STEP ('s') //step by step
 #define CONTINUE ('c') //continue
 #define SKIP (' ') //space
+#define JUMP ('j') //jump
 #define RESTART ('r') //restart
 #define EXIT (27) //esc
 
@@ -28,18 +29,29 @@ using namespace cv;
 
 ros::Publisher path_pub;
 ros::Publisher odom_pub;
-ros::Publisher window_pub;
+ros::Publisher sliding_window_pub;
+ros::Publisher marg_frames_pub;
 
 int index_ = 0;
 int length = 0;
 std::vector<rosbag::View::iterator> vIter;
 
+string TOPIC_DEBUG_IMAGE = "/image_processor/debug_stereo_image/compressed";
+string TOPIC_TRACKING_FEATURES= "/image_processor/features";
+string TOPIC_USED_FEATURES = "/MsckfVio/used_features";
+string TOPIC_LOST_FEATURES = "/MsckfVio/lost_features";
+string TOPIC_ODOMETRY = "/MsckfVio/odom";
+string TOPIC_PATH = "/MsckfVio/path";
+string TOPIC_SLIDING_WINDOW = "/MsckfVio/sliding_window";
+string TOPIC_MARGINALIZED_FRAME = "/MsckfVio/marginalized_frame";
+
 map<double,sensor_msgs::CompressedImage::ConstPtr> image_msgs;
-map<double,msckf::CameraMeasurementConstPtr> tracking_features_msgs;
+map<double,msckf::CameraMeasurementConstPtr> current_features_msgs;
+map<double,msckf::CameraMeasurementConstPtr> used_features_msgs;
 map<double,msckf::CameraMeasurementConstPtr> lost_features_msgs;
 map<double,nav_msgs::Odometry::ConstPtr> odom_msgs;
 map<double,nav_msgs::Path::ConstPtr> path_msgs;
-map<double,nav_msgs::Path::ConstPtr> window_msgs;
+map<double,nav_msgs::Path::ConstPtr> sliding_window_msgs;
 map<double,nav_msgs::Path::ConstPtr> marg_frame_msgs;
 
 void printHelp()
@@ -48,6 +60,7 @@ void printHelp()
   printf("  prev:     p\n");
   printf("  next:     n\n");
   printf("  step:     s\n");
+  printf("  jump:     j\n");
   printf("  skip:     space\n");
   printf("  continue: c\n");
   printf("  restart:  r\n");
@@ -55,56 +68,55 @@ void printHelp()
   printf("------------------\n");
 }
 
-
 void getAllMessages(rosbag::View *pView)
 {
   //rosbag::View view(bag, rosbag::TopicQuery(topics));
   for(rosbag::View::iterator iter=pView->begin();iter!=pView->end();iter++) {
     rosbag::MessageInstance m = (*iter);
+    string topic_name = m.getTopic();
+    double timestamp;
     
     //current debug image
     //sensor_msgs::Image::ConstPtr image_msg = m.instantiate<sensor_msgs::Image>();
     sensor_msgs::CompressedImage::ConstPtr image_msg = m.instantiate<sensor_msgs::CompressedImage>();
     if(image_msg != NULL) {
-      double timestamp = image_msg->header.stamp.toSec();
-      //cv_bridge::CvImage cvi;
-      //cvi.header = image_msg->header;
-      //cvi.encoding = "bgr8";
-      //cvi.image = cv::imdecode(Mat(image_msg->data),1).clone();
-      //sensor_msgs::Image::Ptr raw_image_msg = cvi.toImageMsg();
-      image_msgs.insert(make_pair(timestamp,image_msg));
+      timestamp = image_msg->header.stamp.toSec();
+      if( topic_name == TOPIC_DEBUG_IMAGE )
+	image_msgs.insert(make_pair(timestamp,image_msg));
     }
 
     //features
     msckf::CameraMeasurementConstPtr features_msg = m.instantiate<msckf::CameraMeasurement>();
     if(features_msg != NULL) {
-      double timestamp = features_msg->header.stamp.toSec();
-      if(features_msg->header.frame_id == "features") {
-	//tracking features
-	tracking_features_msgs.insert(make_pair(timestamp,features_msg));
-	//tracking_features_msgs
-	//tracking_features_msgs.push_back(features_msg);
-      }else if(features_msg->header.frame_id == "lost_features") {
-	//lost features
+      timestamp = features_msg->header.stamp.toSec();
+      if( topic_name == TOPIC_TRACKING_FEATURES ) {
+	current_features_msgs.insert(make_pair(timestamp,features_msg));
+      }else if( topic_name == TOPIC_LOST_FEATURES ) {
 	lost_features_msgs.insert(make_pair(timestamp,features_msg));
-	//lost_features_msgs.push_back(features_msg);
+      }else if( topic_name == TOPIC_USED_FEATURES) {
+	used_features_msgs.insert(make_pair(timestamp,features_msg));
       }
     }
 
     //current odometry
     nav_msgs::Odometry::ConstPtr odom_msg = m.instantiate<nav_msgs::Odometry>();
     if(odom_msg != NULL) {
-      double timestamp = odom_msg->header.stamp.toSec();
-      odom_msgs.insert(make_pair(timestamp,odom_msg));
-      //odom_msgs.push_back(odom_msg);
+      timestamp = odom_msg->header.stamp.toSec();
+      if( topic_name == TOPIC_ODOMETRY ) {
+	odom_msgs.insert(make_pair(timestamp,odom_msg));
+      }
     }
 
     //current path
     nav_msgs::Path::ConstPtr path_msg = m.instantiate<nav_msgs::Path>();
     if(path_msg != NULL) {
-      double timestamp = path_msg->header.stamp.toSec();
-      path_msgs.insert(make_pair(timestamp,path_msg));
-      //path_msgs.push_back(path_msg);
+      timestamp = path_msg->header.stamp.toSec();
+      if( topic_name == TOPIC_PATH )
+	path_msgs.insert(make_pair(timestamp,path_msg));
+      else if( topic_name == TOPIC_SLIDING_WINDOW )
+	sliding_window_msgs.insert(make_pair(timestamp,path_msg));
+      else if( topic_name == TOPIC_MARGINALIZED_FRAME )
+	marg_frame_msgs.insert(make_pair(timestamp,path_msg));
     }
   }
 }
@@ -112,14 +124,28 @@ void getAllMessages(rosbag::View *pView)
 
 void processMessage(int nIndex)
 {
-  //get timestamp
+  //get timestamp,通过时间戳访问各种消息
   map<double,sensor_msgs::CompressedImage::ConstPtr>::iterator iter = image_msgs.begin();
   advance(iter,nIndex);
   double timestamp = (*iter).first;
-  
-  //current debug image
+
   sensor_msgs::CompressedImage::ConstPtr image_msg = image_msgs[timestamp];
+  msckf::CameraMeasurementConstPtr lost_features_msg = lost_features_msgs[timestamp];
+  msckf::CameraMeasurementConstPtr current_features_msg = current_features_msgs[timestamp];
+  msckf::CameraMeasurementConstPtr used_features_msg = used_features_msgs[timestamp];
+  nav_msgs::Path::ConstPtr sliding_window_msg = sliding_window_msgs[timestamp];
+  nav_msgs::Odometry::ConstPtr odom_msg = odom_msgs[timestamp];
+  nav_msgs::Path::ConstPtr path_msg = path_msgs[timestamp];
+  nav_msgs::Path::ConstPtr marg_msg = marg_frame_msgs[timestamp];
+ 
+  /*
+   *  第一部分：当前帧的处理
+   *      1.画出当前帧 
+   *      2.画出当前帧中用来update的点
+   */
+  //current debug image
   if(image_msg != NULL) {
+    // 1. 画出debug_image
     char str[128];
     //Mat show_img = cv_bridge::toCvShare(image_msg, "bgr8")->image;
     Mat show_img = cv::imdecode(Mat(image_msg->data), 1);
@@ -127,71 +153,125 @@ void processMessage(int nIndex)
     putText(show_img, str, Point2f(10,50), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0));
     sprintf(str,"time: %lf",image_msg->header.stamp.toSec());
     putText(show_img, str, Point2f(10,65), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0));
+    int n_used=0, n_lost=0;
+    if(used_features_msg)
+      n_used = used_features_msg->features.size();
+    if(lost_features_msg)
+      n_lost = lost_features_msg->features.size();
+    sprintf(str,"features used/lost: %d/%d",n_used,n_lost);
+    putText(show_img, str, Point2f(10,80), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0));
+    
+    // 2.1 在当前的debug_image中画出used features
+    //current tracking features,得到一个map<feature_id，point坐标>
+    map<unsigned long long int,Point2f> current_pts;
+    if(current_features_msg != NULL) {
+      for (const auto& feature : current_features_msg->features) {
+	current_pts.insert(make_pair(feature.id,Point2f(feature.du0,feature.dv0)));
+      }
+    }
+
+    // 2.2 找到当前帧用来update的点
+    //current used features
+    vector<unsigned long long int> used_features_id;
+    if(used_features_msg != NULL) {
+      for (const auto& feature : used_features_msg->features) {
+	used_features_id.push_back(feature.id);
+      }
+    }
+
+    // 2.3 找到used features的图像坐标，画出来
+    //current used features
+    for (const auto& feature_id : used_features_id) {
+      map<unsigned long long int, Point2f>::iterator it;
+      it = current_pts.find(feature_id);
+      if(it != current_pts.end()) {
+	Point2f pt = it->second;
+	circle(show_img, pt, 5, Scalar(255,0,0),3);
+      }
+    }
+
     imshow("stereo_debug", show_img);
     waitKey(1);
-  }
 
-  //current lost features
-  vector<unsigned long long int> lost_features_id;
-  msckf::CameraMeasurementConstPtr lost_features_msg = lost_features_msgs[timestamp];
-  if(lost_features_msg != NULL) {
-    if(lost_features_msg->header.frame_id == "lost_features") {
-      for (const auto& feature : lost_features_msg->features) {
-	//draw the lost features in last frame
-	//printf("%lf",(double)lost_features_msg->header.stamp.toSec());
-	//cout<<" current lost feature:"<<feature.id<<endl;
-	//cout<<feature.du0<<","<<feature.dv0<<endl;
-	lost_features_id.push_back(feature.id);
+    // 2.3 把当前帧和sliding window中帧的共视关系show出来
+    if(sliding_window_msg != NULL) {
+      map<double,int>covisible_features;
+      for (const auto& pose : sliding_window_msg->poses) {
+	int n_covisible = 0;
+	double t = pose.header.stamp.toSec();
+	msckf::CameraMeasurementConstPtr window_features_msg = current_features_msgs[t];
+	if(window_features_msg != NULL) {
+	  for (const auto& feature_ : window_features_msg->features) {
+	    for (const auto& feature : current_features_msg->features) {
+	      if(feature.id == feature_.id) n_covisible++;
+	    }
+	  }
+	  covisible_features.insert(make_pair(t,n_covisible));
+	}
       }
-    }
-  }
-
-  //current tracking features
-  msckf::CameraMeasurementConstPtr tracking_features_msg = tracking_features_msgs[timestamp];
-  if(tracking_features_msg != NULL) {
-    if(tracking_features_msg->header.frame_id == "features") {
-      for (const auto& feature : tracking_features_msg->features) {
-	//draw the lost features in last frame
-	//cout<<"lost id:"<<feature.id<<"    ";
-	//cout<<feature.du0<<","<<feature.dv0<<endl;
-	//tracking_features_id.push_back(feature.id);
+      printf("\n---------sliding window共视关系------\n");
+      printf("index  timestamp           covisible\n");
+      //for(int i=0;i<covisible_features.size();i++) {
+      int i=0;
+      map<double,int>::iterator it;
+      for(it=covisible_features.begin();it!=covisible_features.end();it++,i++) {
+	char str[256];
+	sprintf(str, "%3d    %lf     %d",i , it->first, it->second);
+	printf("%s\n",str);
       }
+      printf(" cur   %lf     %d\n",timestamp, current_features_msg->features.size());
     }
+      
   }
 
 
-  //prev
+
+  /*
+   *  第二部分：前一帧的处理
+   *      1.画出在当前帧丢失、并用来update的点
+   */
+  
+  // 前一帧的debug_image
   if(nIndex > 0 && nIndex < length) {
     map<double,sensor_msgs::CompressedImage::ConstPtr>::iterator iter1 = image_msgs.begin();
     advance(iter1,nIndex-1);
     double prev_timestamp = (*iter1).first;
-  
-    //prev tracking features
-    map<unsigned long long int,Point2f> prev_tracking_pts;
-    msckf::CameraMeasurementConstPtr prev_tracking_features_msg = tracking_features_msgs[prev_timestamp];
-    if(prev_tracking_features_msg != NULL) {
-      if(prev_tracking_features_msg->header.frame_id == "features") {
-	for (const auto& feature : prev_tracking_features_msg->features) {
-	  //printf("%lf",(double)prev_tracking_features_msg->header.stamp.toSec());
-	  //cout<<" prev tracking feature:"<<feature.id<<" "<<Point2f(feature.du0,feature.dv0)<<endl;
-	  prev_tracking_pts.insert(make_pair(feature.id,Point2f(feature.du0,feature.dv0)));
-	}
-      }
-    }
 
     //prev debug message
     sensor_msgs::CompressedImage::ConstPtr prev_image_msg = image_msgs[prev_timestamp];
     if(prev_image_msg != NULL) {
+      // 1.前一帧的图像
       char str[16];
       Mat show_img = cv::imdecode(Mat(prev_image_msg->data),1);
       //Mat show_img = cv_bridge::toCvShare(prev_image_msg, "bgr8")->image.clone();
       sprintf(str,"%d of %d",index_-1,length);
       putText(show_img, str, Point2f(10,50), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0));
 
+      // 2.找到前一帧图像中所有的点，做一个map<feature_id,Point>
+      //prev tracking features
+      map<unsigned long long int,Point2f> prev_pts;
+      msckf::CameraMeasurementConstPtr prev_features_msg = current_features_msgs[prev_timestamp];
+      if(prev_features_msg != NULL) {
+	for (const auto& feature : prev_features_msg->features) {
+	  prev_pts.insert(make_pair(feature.id,Point2f(feature.du0,feature.dv0)));
+	}
+      }
+
+      // 3.找到从前一帧到当前帧跟踪丢失的点
+      //current lost features
+      vector<unsigned long long int> lost_features_id;
+      if(lost_features_msg != NULL) {
+	for (const auto& feature : lost_features_msg->features) {
+	  lost_features_id.push_back(feature.id);
+	}
+      }
+
+
+      // 4.把当前帧丢失的点在前一帧中画出来
       for (const auto& feature_id : lost_features_id) {
 	map<unsigned long long int, Point2f>::iterator it;
-	it = prev_tracking_pts.find(feature_id);
-	if(it != prev_tracking_pts.end()) {
+	it = prev_pts.find(feature_id);
+	if(it != prev_pts.end()) {
 	  Point2f pt = it->second;
 	  circle(show_img, pt, 5, Scalar(0,0,255),3);
 	}
@@ -201,26 +281,26 @@ void processMessage(int nIndex)
     }
   }
 
-  
-  //current odometry
-  nav_msgs::Odometry::ConstPtr odom_msg = odom_msgs[timestamp];
+
+  /*
+   * 其它message
+   *
+   */
   if(odom_msg != NULL) {
-    //cout<<"odom:"<<odom_msg->header.stamp<<endl;
     odom_pub.publish(*odom_msg);
   }
 
-  //current path
-  nav_msgs::Path::ConstPtr path_msg = path_msgs[timestamp];
   if(path_msg != NULL) {
-    //cout<<"path:"<<path_msg->header.stamp<<endl;
     path_pub.publish(*path_msg);
   }
 
-  //current sliding window
-  nav_msgs::Path::ConstPtr window_msg = window_msgs[timestamp];
-  if(window_msg != NULL) {
-    //cout<<"path:"<<path_msg->header.stamp<<endl;
-    window_pub.publish(*window_msg);
+  if(sliding_window_msg != NULL) {
+    sliding_window_pub.publish(*sliding_window_msg);
+  }
+
+  // marginalized frame
+  if(marg_msg != NULL) {
+    marg_frames_pub.publish(*marg_msg);
   }
 }
 
@@ -239,51 +319,50 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "show_msckf_bag");
   ros::NodeHandle nh;
 
+  if(NULL == argv[1]) {
+    cout<<"parameter invalid,you should used command:"<<endl;
+    cout<<"  rosrun slam_debug show_msckf_bag [bag file path]"<<endl;
+    return -1;
+  }
+    
   printHelp();
   
   // register publisher
   path_pub = nh.advertise<nav_msgs::Path>("path", 1);
   odom_pub = nh.advertise<nav_msgs::Odometry>("odom", 1);
+  sliding_window_pub = nh.advertise<nav_msgs::Path>("sliding_window", 1);
+  marg_frames_pub = nh.advertise<nav_msgs::Path>("maginalized_frame", 1);
 
-#ifdef LIVE
   // open bag
   rosbag::Bag bag;
-  bag.open("/home/sst/catkin_ws2/test_live.bag", rosbag::bagmode::Read);
+  cout<<"opening bag file...";
+  bag.open(argv[1], rosbag::bagmode::Read);
+  cout<<"done"<<endl;
 
+  // query topics
   std::vector<std::string> topics;
-  topics.push_back(std::string("/msckf/debug_stereo_image"));
-  topics.push_back(std::string("/msckf/path"));
-  topics.push_back(std::string("/msckf/odom"));
-  topics.push_back(std::string("/msckf/imu_bias"));
-  topics.push_back(std::string("/msckf/features"));
-  topics.push_back(std::string("/msckf/lost_features"));
-#else
-    // open bag
-  rosbag::Bag bag;
-  bag.open("/home/sst/catkin_ws2/test_dataset.bag", rosbag::bagmode::Read);
-
-  std::vector<std::string> topics;
-  topics.push_back(std::string("/image_processor/debug_stereo_image/compressed"));
-  topics.push_back(std::string("/image_processor/features"));
-  topics.push_back(std::string("/MsckfVio/path"));
-  topics.push_back(std::string("/MsckfVio/odom"));
-  topics.push_back(std::string("/MsckfVio/sliding_window"));
-  topics.push_back(std::string("/MsckfVio/marginalized_frame"));
-  topics.push_back(std::string("/MsckfVio/imu_bias"));
-  topics.push_back(std::string("/MsckfVio/lost_features"));
-#endif
+  topics.push_back(TOPIC_DEBUG_IMAGE);
+  topics.push_back(TOPIC_USED_FEATURES);
+  topics.push_back(TOPIC_LOST_FEATURES);
+  topics.push_back(TOPIC_TRACKING_FEATURES);
+  topics.push_back(TOPIC_PATH);
+  topics.push_back(TOPIC_ODOMETRY);
+  topics.push_back(TOPIC_SLIDING_WINDOW);
+  topics.push_back(TOPIC_MARGINALIZED_FRAME);
   
-
   rosbag::View view(bag, rosbag::TopicQuery(topics));
+  cout<<"quering topics...";
   getAllMessages(&view);
+  cout<<"done"<<endl;
 
-  cout<<" image_msgs:"<< image_msgs.size()<<endl;
-  cout<<" tracking_features_msgs:"<< tracking_features_msgs.size()<<endl;
-  cout<<" lost_features_msgs:"<< lost_features_msgs.size()<<endl;
-  cout<<" odom_msgs:"<< odom_msgs.size()<<endl;
-  cout<<" path_msgs:"<< path_msgs.size()<<endl;
-  cout<<" sliding_window_msgs:"<< window_msgs.size()<<endl;
-  cout<<" marg_frame_msgs:"<< marg_frame_msgs.size()<<endl;
+  cout<<" | debug_image_msgs:"<< image_msgs.size()<<endl;
+  cout<<" | current_features_msgs:"<< current_features_msgs.size()<<endl;
+  cout<<" | lost_features_msgs:"<< lost_features_msgs.size()<<endl;
+  cout<<" | used_features_msgs:"<< used_features_msgs.size()<<endl;
+  cout<<" | odom_msgs:"<< odom_msgs.size()<<endl;
+  cout<<" | path_msgs:"<< path_msgs.size()<<endl;
+  cout<<" | sliding_window_msgs:"<< sliding_window_msgs.size()<<endl;
+  cout<<" | marg_frame_msgs:"<< marg_frame_msgs.size()<<endl;
 
   namedWindow("stereo_debug");
   namedWindow("stereo_debug_prev");
@@ -312,6 +391,13 @@ int main(int argc, char **argv)
 	cout<<"enter steps:";
 	scanf("%d",&steps);
 	index_ += steps;
+	//iter = std::find(iter,steps);
+	break;
+      }
+      case JUMP: {
+	cout<<"jump to:";
+	scanf("%d",&steps);
+	index_ = steps;
 	//iter = std::find(iter,steps);
 	break;
       }
