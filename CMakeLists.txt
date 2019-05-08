@@ -18,12 +18,19 @@ find_package(catkin REQUIRED COMPONENTS
     rosbag
     tf
     cv_bridge
+    dynamic_reconfigure
     )
 
 find_package(OpenCV REQUIRED)
 find_package(Pangolin REQUIRED)
 
-catkin_package()
+generate_dynamic_reconfigure_options(
+  cfg/Tutorials.cfg
+  #...
+)
+
+catkin_package(
+)
 
 include_directories(
   include
@@ -46,4 +53,14 @@ add_executable(show_msckf_bag
     )
 target_link_libraries(show_msckf_bag ${catkin_LIBRARIES} ${OpenCV_LIBS}  ${Pangolin_LIBRARIES}) 
 
+# test ros dynamic_reconfig
+add_executable(dynamic_reconfig
+    src/dynamic_reconfig.cpp
+    )
+target_link_libraries(dynamic_reconfig ${catkin_LIBRARIES} ${OpenCV_LIBS}  ${Pangolin_LIBRARIES})
 
+# show cost of move_base/costmap
+add_executable(show_costmap
+    src/show_costmap.cpp
+    )
+target_link_libraries(show_costmap ${catkin_LIBRARIES} ${OpenCV_LIBS}) 
